@@ -1,4 +1,4 @@
-//COS sensing bi-directional repeater for Arduino
+//COS sensing bi-directional repeater for Arduino ATTiny84
 //Matthew Miller
 //KK4NDE
 //17-Sept-2016
@@ -8,7 +8,6 @@
 //  Initial version
 //cos_repeater_generic2 - Matthew Miller 10 December 2016
 //  Bugfix - changed COS function for clarity to match wiring
-//  Debug - added Serial deugging enabled with preprocessor flag
 //cos_repeater_generic3 - Matthew Miller 10 December 2016
 //  Added flag to only ID if radio transmitted
 //  Cleaned up some code
@@ -17,56 +16,42 @@
 //  Fixed battMon flag changed int to boolean
 
 //This is based on the VOX repeater sketch but modified for more reliable use
-//by interfaceing radios equipped with carrier-operated squealch output.
+//by interfaceing radios equipped with carrier-operated squelch output.
 
 //I have provided example pin numbers that I think would work with the Arduino Uno,
 //they can be changed for other boards or ATTINY chips depending on your need.
 //configure the #define at the beginning of the code
 //configure the radioA.value radioB.value lines in the setup() function
-//NOTE: voltSensePin, radioA.cosPin, and radioB.cosPin should be DIGITAL inputs
-//if you don't want to use the voltSensePin just tie that pin to +V and it will always assume the battery is full
+//NOTE: radioA.cosPin, and radioB.cosPin should be DIGITAL inputs
 
 //Callsign to ID with, use lowercase only
-#define CALLSIGN "xx0xxx"
+#define CALLSIGN "testing"
 
-//Sets the COS (Carrier Operated Squealch) value to represent "squealch open"
-//If your COS is +V when carrier present/squealch open, use HIGH
-//If your COS is 0V when carrier present/squealch open, use LOW
+//Sets the COS (Carrier Operated Squelch) value to represent "squelch open"
+//If your COS is +V when carrier present/squelch open, use HIGH
+//If your COS is 0V when carrier present/squelch open, use LOW
 #define COS_VALUE_SQL_OPEN LOW
-
-//Analog pin for voltage sense
-#define voltSensePin 0
-
-//define threshold for low battery
-#define lowBattThreshold 11.5
-
-//define threshold below which low battery is not triggered
-//this lets you power it with low-voltage and not get any alerts
-#define lowNotifyFloor 9.5
 
 //how many milliseconds to ID every
 //600000 is 10 minutes in milliseconds
-#define idTimeout 600000
-#define onlyIdAfterTx true
+#define idTimeout 300000 //= 5 min.
+#define onlyIdAfterTx false // send ID after time.
 
-//define delay for squealch-tail hold over in milliseconds
+//define delay for squelch-tail hold over in milliseconds
 #define cosDelay 1000
 
 //morse code "dit" base unit length in milliseconds
 #define ditLen 60
 
 //the pitch for the dit/dah tone used by the ID
-#define tonePitch 800
+#define tonePitch 900
 
-//Time out in millis
-#define timeOut 120000UL
+//Time out in millis //*****************************//ADDED
+#define timeOut 600000UL //= 1 mins for testing.
 
-//uncomment to enable serial debugging
-//#define ENABLE_DEBUG
-//#define ENABLE_DEBUG_COS_STATE
-//#define ENABLE_DEBUG_PTT
-//#define ENABLE_DEBUG_RADIO_STATE
-//#define ENABLE_DEBUG_NEEDSID
+//Tx delay for tot message
+#define TXDelay 200U
+
 
 //data structure for radio info
 struct Radio
@@ -83,9 +68,6 @@ struct Radio
           isTimedOut=false,
           needsId=true,
           txAllowed=true;
-  #ifdef ENABLE_DEBUG
-  String nametag;
-  #endif
 };
 
 //globals to store radio config
@@ -95,14 +77,9 @@ Radio radioA, radioB;
 void configure(Radio &radio);
 void cosCheckAndRepeat(Radio &rxRadio, Radio &txRadio);
 void txAutoId(Radio &radio);
-void lowBattCheck(Radio &radio);
+
 boolean isBusy(Radio &radio);
 
-//some declarations for debugging
-#ifdef ENABLE_DEBUG
-void printRadioState(Radio &radio);
-long debugRadioStateLastTime=0;
-#endif
 
 void setup() {
   Serial.begin(9600);
@@ -117,25 +94,16 @@ void setup() {
   radioA.micPin=3;
   radioA.pttPin=4;
   radioA.autoId=true;
-  radioA.battMon=false;
   radioA.txAllowed=true;
-  //for debugging only
-  #ifdef ENABLE_DEBUG
-  radioA.nametag="radioA";
-  #endif
-
+ 
   //set config for radio B
   //Note, these would all be "digital" pins
   radioB.cosPin=5;
   radioB.micPin=6;
   radioB.pttPin=7;
   radioB.autoId=true;
-  radioB.battMon=false;
+ 
   radioB.txAllowed=true;
-  //for debugging only
-  #ifdef ENABLE_DEBUG
-  radioB.nametag="radioB";
-  #endif
   
   //apply config for radios (set pinmode/etc)
   configure(radioA);
@@ -145,18 +113,11 @@ void setup() {
   txAutoId(radioA);
   txAutoId(radioB);
 
-  #ifdef ENABLE_DEBUG
-  printSetupDebug();
-  #endif
-}
+ }
 
 //configures pinmode and setup for radio
 void configure(Radio &radio)
 {
-  #ifdef ENABLE_DEBUG
-  Serial.print("Configuring ");
-  Serial.println(radio.nametag);
-  #endif
   pinMode(radio.micPin,OUTPUT);
   pinMode(radio.pttPin,OUTPUT);
   digitalWrite(radio.micPin,LOW);
@@ -165,39 +126,26 @@ void configure(Radio &radio)
 
 void loop()
 {
-  if(isEnabled(radioA.txAllowed) && !isBusy(radioB)) //if the other radio is transmitting, this one must be receiving so don't key up
+  if(isEnabled(radioA.txAllowed) && !isBusy(radioB,radioA)) //if the other radio is transmitting, this one must be receiving so don't key up
   {
-    lowBattCheck(radioA);
+    
     txAutoId(radioA);
     cosCheckAndRepeat(radioB,radioA);
   }
     
-  if(isEnabled(radioB.txAllowed) && !isBusy(radioA)) //if the other radio is transmitting, this one must be receiving so don't key up 
+  if(isEnabled(radioB.txAllowed) && !isBusy(radioA,radioB)) //if the other radio is transmitting, this one must be receiving so don't key up 
   {
-    lowBattCheck(radioB);
+    
     txAutoId(radioB);
     cosCheckAndRepeat(radioA,radioB);
   }
 
-  #ifdef ENABLE_DEBUG_RADIO_STATE
-  if(millis()-debugRadioStateLastTime > 10000)
-  {
-    printAllRadioState();
-    debugRadioStateLastTime=millis();
-  }
-  #endif
-}
+ }
 
 //checks if a radio's PTT pin is keyed
-boolean isBusy(Radio &radio)
+boolean isBusy(Radio &radio, Radio &rxRadio)
 {
   boolean isBusy = digitalRead(radio.pttPin);
-  #ifdef ENABLE_DEBUG_VERBOSE
-  Serial.print(radio.nametag);
-  Serial.print(" isBusy");
-  Serial.print("=");
-  Serial.println(isBusy);
-  #endif
   if (isBusy){
     // If we are timing out
     if (millis() - radio.totc >= timeOut){
@@ -206,7 +154,15 @@ boolean isBusy(Radio &radio)
       digitalWrite(radio.pttPin,LOW);
     }
   }
-  
+
+    // Reset timeout state
+  if (radio.isTimedOut && digitalRead(rxRadio.cosPin) != COS_VALUE_SQL_OPEN){
+    radio.isTimedOut = false;
+    digitalWrite(rxRadio.pttPin,HIGH);
+    delay(TXDelay);
+    morseCode(radio.micPin, "ok");
+    digitalWrite(rxRadio.pttPin,LOW);
+  }  
   return isBusy;
 }
 
@@ -230,25 +186,23 @@ void cosCheckAndRepeat(Radio &rxRadio, Radio &txRadio)
     // test if the pin has cos
     if(digitalRead(rxRadio.cosPin) == COS_VALUE_SQL_OPEN)
     {
-      #ifdef ENABLE_DEBUG_COS_STATE
-      Serial.print("COS squealch open on ");
-      Serial.println(rxRadio.nametag);
-      #endif
-  
+     
+	 //**************************************************//
+	 //             My thoughts:                        //
+  //**************************************************//
+	 // Check to see if cos active.
+	 //if cos millis >= Time out Timer 
+	 // then txRadio pttPin ,LOW
+	 // if cos not active, then reset Time out Timer
+	 //send morse "tot" , then ptt =LOW.
+	 //***************************************************//
+	 
       //cos active
-      #ifdef ENABLE_DEBUG_PTT
-      Serial.print("Turning on TX for ");
-      Serial.println(txRadio.nametag);
-      #endif
       // Reset the Timeout timer
       if (!txRadio.isTimedOut)
         txRadio.totc = millis();
       // Check if we have timed out
       (txRadio.isTimedOut) ? digitalWrite(txRadio.pttPin,LOW) : digitalWrite(txRadio.pttPin,HIGH);
-      #ifdef ENABLE_DEBUG_NEEDSID
-      Serial.print(txRadio.nametag);
-      Serial.println("setting needsId=true in 'cos active' if clause");
-      #endif
       txRadio.needsId=true;
       rxRadio.lastCosTime=millis();
     }
@@ -257,23 +211,12 @@ void cosCheckAndRepeat(Radio &rxRadio, Radio &txRadio)
       if(millis()-rxRadio.lastCosTime < cosDelay)
       {
         //cos delay
-        #ifdef ENABLE_DEBUG_NEEDSID
-        Serial.print(txRadio.nametag);
-        Serial.println("setting needsId=true in 'cos delay' else-if clause");
-        #endif
         txRadio.needsId=true;
       }
       else
       {
-        #ifdef ENABLE_DEBUG_PTT
-        Serial.print("Turning off TX for ");
-        Serial.println(txRadio.nametag);
-        #endif
         digitalWrite(txRadio.pttPin,LOW);
       }
-      // Reset timeout state
-      if (txRadio.isTimedOut)
-        txRadio.isTimedOut = false;
     }
   }
 }
@@ -291,19 +234,11 @@ void txAutoId(Radio &radio)
   
   if(isEnabled(radio.txAllowed) && isEnabled(radio.autoId) && (millis()-radio.lastIdTime) > idTimeout)
   {
-    #ifdef ENABLE_DEBUG
-    Serial.print("Sending autoID on ");
-    Serial.println(radio.nametag);
-    #endif
-  
+    
     boolean tx=digitalRead(radio.pttPin);
     digitalWrite(radio.pttPin,HIGH);
     delay(500);
     morseCode(radio.micPin,CALLSIGN);
-    #ifdef ENABLE_DEBUG_NEEDSID
-    Serial.print(radio.nametag);
-    Serial.println(" txAutoId setting needsId=false");
-    #endif
     radio.needsId=false;
     radio.lastIdTime=millis();
     digitalWrite(radio.pttPin,tx);
@@ -313,34 +248,22 @@ void txAutoId(Radio &radio)
 //broadcast low battery if applicable
 void lowBattCheck(Radio &radio)
 {
-  float voltage=getPowerVoltage(voltSensePin);
-  if(isEnabled(radio.txAllowed) && isEnabled(radio.battMon) && voltage < lowBattThreshold && voltage > lowNotifyFloor && (millis()-radio.lastBattMonTime) > idTimeout)
-  {
-    #ifdef ENABLE_DEBUG
-    Serial.print("Sending low-battery on ");
-    Serial.println(radio.nametag);
-    #endif
   
+ {
+    
     boolean tx=digitalRead(radio.pttPin);
     digitalWrite(radio.pttPin,HIGH);
     radio.needsId=true;
     delay(500);
     
-    //encode low battery morse code message
-//    char temp[]="lb ";
-//    strcat(temp,voltage);
-//    strcat(temp,"v");
-//    morseCode(radio.micPin,temp);
-    morseCode(radio.micPin,"lb");
-    //morseCode(radio.micPin,"lb "+ toString(voltage) + "v");
     
-    radio.lastBattMonTime=millis();
-    digitalWrite(radio.pttPin,tx);
-    radio.needsId=true;
+   // radio.lastBattMonTime=millis();
+  //  digitalWrite(radio.pttPin,tx);
+  //  radio.needsId=true;
   }
 }
 
-//for floats from ~1 to ~19
+//for floats from ~1 to ~19 //
 void strcat(char * appendTo, float input)
 {
   char temp[]="x";
@@ -630,100 +553,3 @@ int bitMask(int bitNumber)
     value*=2;
   return value;
 }
-
-//gets voltage from analog input pin
-float getPowerVoltage(int pin)
-{
-  // R1 = 2200 (Vin to midpoint)
-  // R2 = 1000 (midpoint to gnd)
-  // put 5.1v protectioin zener in parallel for R2 to protect arduino input against overvolt
-  // formula:
-  //     ( value/1023 * (arduino vcc) ) / (  R2   /     (R2 + R1)    ) + (Vin diode drop)
-  //return ((analogRead(pin)/1023.0)*5.0) / (1000.0 / (2200.0 + 1000.0)) + 0.76 ;
-  return (analogRead(pin)*0.0156402737047898) + 0.76; //simplified
-}
-
-
-#ifdef ENABLE_DEBUG
-void printSetupDebug()
-{
-  Serial.println("------ setup() complete ------");
-  printProgramConfig();
-  Serial.println("");
-  printRadioState(radioA);
-  Serial.println("");
-  printRadioState(radioB);
-  Serial.println("------------------------------");
-  debugRadioStateLastTime=millis();
-}
-
-void printAllRadioState()
-{
-  Serial.println("------ radio state ------");
-  Serial.print("millis=");
-  Serial.println(millis());
-  Serial.println("");
-  printRadioState(radioA);
-  Serial.println("");
-  printRadioState(radioB);
-  Serial.println("-------------------------");
-}
-
-void printProgramConfig()
-{
-  Serial.print("CALLSIGN=");
-  Serial.println(CALLSIGN);
-  Serial.print("COS_VALUE_SQL_OPEN=");
-  Serial.println(COS_VALUE_SQL_OPEN);
-  Serial.print("voltSensePin=");
-  Serial.println(voltSensePin);
-  Serial.print("lowBattThreshold=");
-  Serial.println(lowBattThreshold);
-  Serial.print("lowNotifyFloor=");
-  Serial.println(lowNotifyFloor);
-  Serial.print("idTimeout=");
-  Serial.print(idTimeout);
-  float idTimeoutSec=((float)idTimeout/1000);
-  Serial.print(" (");
-  Serial.print(idTimeoutSec);
-  Serial.println(" seconds)");
-  Serial.print("cosDelay=");
-  Serial.print("cosDelay");
-  Serial.println("ms");
-  Serial.print("ditLen=");
-  Serial.println(ditLen);
-  Serial.print("tonePitch");
-  Serial.println(tonePitch);
-}
-
-void printRadioState(Radio &radio)
-{
-  //cosPin - Audio In (for COS) - Digital Pin
-  //micPin - MIC Mix (for tone) - Digital Pin
-  //pttPin - PTT OUT (for TX)   - Digital Pin
-  Serial.print("Radio state debug: ");
-  Serial.println(radio.nametag);
-  Serial.print("memAddr=");
-  Serial.println(reinterpret_cast<int>(&radio));
-  Serial.print("micPin=");
-  Serial.println(radio.micPin);
-  Serial.print("pttPin=");
-  Serial.println(radio.pttPin);
-  Serial.print("cosPin=");
-  Serial.println(radio.cosPin);
-  Serial.print("autoId=");
-  Serial.println(radio.autoId);
-  Serial.print("battMon=");
-  Serial.println(radio.battMon);
-  Serial.print("lastBattMonTime=");
-  Serial.println(radio.lastBattMonTime);
-  Serial.print("lastIdTime=");
-  Serial.println(radio.lastIdTime);
-  Serial.print("lastCosTime=");
-  Serial.println(radio.lastCosTime);
-  Serial.print("needsId=");
-  Serial.println(radio.needsId);
-  Serial.print("txAllowed=");
-  Serial.println(radio.txAllowed);
-}
-#endif}
